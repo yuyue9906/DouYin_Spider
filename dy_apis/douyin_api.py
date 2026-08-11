@@ -187,7 +187,7 @@ class DouyinAPI:
         params.add_param("channel", "channel_pc_web")
         params.add_param("aweme_id", aweme_id)
         params.add_param("cursor", cursor)
-        params.add_param("count", "5")
+        params.add_param("count", str(kwargs.get("count", "20")))
         params.add_param("item_type", "0")
         params.add_param("whale_cut_token", "")
         params.add_param("cut_version", "1")
@@ -998,7 +998,16 @@ class DouyinAPI:
         params.with_a_bogus(data)
         res = requests.post(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), params=params.get(),
                             cookies=auth.cookie, data=data, verify=False)
-        return res.json()
+        try:
+            return res.json()
+        except ValueError:
+            return {
+                "status_code": -1,
+                "http_status": res.status_code,
+                "content_type": res.headers.get("content-type", ""),
+                "location": res.headers.get("location", ""),
+                "response_preview": res.text[:500],
+            }
 
     @staticmethod
     def move_collect_aweme(auth, aweme_id: str, collect_name: str, collect_id: str, **kwargs):
