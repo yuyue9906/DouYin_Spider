@@ -38,6 +38,12 @@ class FakeAPI:
 
 
 class CollectorTests(unittest.TestCase):
+    def test_extracts_note_aweme_id(self):
+        self.assertEqual(
+            "7671539215188245434",
+            collector.extract_aweme_id("https://www.douyin.com/note/7671539215188245434"),
+        )
+
     @patch.object(collector, "DouyinAPI", FakeAPI)
     def test_collect_filter_replies_and_cached_profile(self):
         rows, pages = collector.collect_comments(object(), "https://www.douyin.com/video/123", "湖北", True)
@@ -46,6 +52,24 @@ class CollectorTests(unittest.TestCase):
         count = collector.enrich_profiles(object(), rows, interval=0)
         self.assertEqual(1, count)
         self.assertTrue(all(row["gender"] == "男" for row in rows))
+
+    @patch.object(collector, "DouyinAPI", FakeAPI)
+    def test_collect_deduplicates_comment_ids_across_pages(self):
+        original = FakeAPI.pages
+        FakeAPI.pages = {
+            "0": {"status_code": 0, "comments": [
+                {"cid": "same", "text": "one", "ip_label": "湖北", "user": {}}
+            ], "cursor": 10, "has_more": 1},
+            "10": {"status_code": 0, "comments": [
+                {"cid": "same", "text": "one", "ip_label": "湖北", "user": {}},
+                {"cid": "new", "text": "two", "ip_label": "湖北", "user": {}},
+            ], "cursor": 20, "has_more": 0},
+        }
+        try:
+            rows, _ = collector.collect_comments(object(), "url", "湖北", candidate_limit=2)
+        finally:
+            FakeAPI.pages = original
+        self.assertEqual(["same", "new"], [row["cid"] for row in rows])
 
     def test_save_csv_for_excel(self):
         row = collector.comment_row({"cid": "1", "text": "中文", "ip_label": "上海"}, 1)

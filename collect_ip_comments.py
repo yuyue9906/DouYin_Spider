@@ -56,9 +56,12 @@ def parse_args():
 
 
 def extract_aweme_id(url):
-    match = re.search(r"/video/(\d+)", url) or re.search(r"[?&]modal_id=(\d+)", url)
+    match = (
+        re.search(r"/(?:video|note)/(\d+)", url)
+        or re.search(r"[?&]modal_id=(\d+)", url)
+    )
     if not match:
-        raise ValueError("链接中找不到视频 ID，请使用 /video/<数字> 或带 modal_id=<数字> 的链接")
+        raise ValueError("链接中找不到作品 ID，请使用 /video/<数字>、/note/<数字> 或带 modal_id=<数字> 的链接")
     return match.group(1)
 
 
@@ -173,6 +176,7 @@ def collect_comments(
     row_filter=None, candidate_limit=0,
 ):
     rows = []
+    seen_cids = set()
     cursor = "0"
     page = 0
     while True:
@@ -181,9 +185,12 @@ def collect_comments(
         comments = checked_comments(payload)
         for comment in comments:
             row = comment_row(comment, 1)
-            if (row["ip_location"] and (not region or region in row["ip_location"])
+            if (row["cid"] not in seen_cids
+                    and row["ip_location"] and (not region or region in row["ip_location"])
                     and (row_filter is None or row_filter(row))):
                 rows.append(row)
+                if row["cid"]:
+                    seen_cids.add(row["cid"])
                 if candidate_limit and len(rows) >= candidate_limit:
                     return rows, page
 
@@ -191,9 +198,12 @@ def collect_comments(
                 replies = DouyinAPI.get_work_all_inner_comment(auth, comment)
                 for reply in replies:
                     reply_row = comment_row(reply, 2, row["cid"])
-                    if (reply_row["ip_location"] and (not region or region in reply_row["ip_location"])
+                    if (reply_row["cid"] not in seen_cids
+                            and reply_row["ip_location"] and (not region or region in reply_row["ip_location"])
                             and (row_filter is None or row_filter(reply_row))):
                         rows.append(reply_row)
+                        if reply_row["cid"]:
+                            seen_cids.add(reply_row["cid"])
                         if candidate_limit and len(rows) >= candidate_limit:
                             return rows, page
 
