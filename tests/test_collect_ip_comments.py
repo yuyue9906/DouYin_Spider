@@ -94,6 +94,27 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(command["targets"][0]["comment_id"], "c1")
         self.assertEqual(command["targets"][0]["comment_text"], "hello")
 
+    def test_comment_row_has_required_profile_metrics(self):
+        row = collector.comment_row({"text": "自然评论", "user": {"nickname": "小雨"}}, 1)
+        self.assertEqual("小雨", row["nickname"])
+        self.assertIn("follower_count", row)
+        self.assertIn("favoriting_count", row)
+        self.assertIn("total_favorited", row)
+
+    def test_public_profile_reads_fans_and_likes(self):
+        profile = collector.public_profile({"follower_count": 123, "favoriting_count": 45, "total_favorited": 456})
+        self.assertEqual(123, profile["follower_count"])
+        self.assertEqual(45, profile["favoriting_count"])
+        self.assertEqual(456, profile["total_favorited"])
+
+    def test_deduplicate_rows_prefers_first_comment_id(self):
+        rows = collector.deduplicate_rows([
+            {"cid": "c1", "text": "第一条"},
+            {"cid": "c1", "text": "重复"},
+            {"cid": "c2", "text": "第二条"},
+        ])
+        self.assertEqual(["c1", "c2"], [row["cid"] for row in rows])
+
 
 if __name__ == "__main__":
     unittest.main()

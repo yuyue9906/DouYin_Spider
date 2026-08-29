@@ -10,10 +10,17 @@ async def main():
     parser = argparse.ArgumentParser(description="扫码登录抖音并把凭证保存到项目 .env")
     parser.add_argument("--url", default="https://www.douyin.com/", help="登录后要访问的抖音页面")
     parser.add_argument("--timeout", type=int, default=300, help="等待扫码秒数")
+    parser.add_argument("--headless", action="store_true")
+    parser.add_argument("--browser", default=None)
     args = parser.parse_args()
 
     login = DYLoginApi()
-    auth = await login.login_grab_ticket(headless=False, timeout=args.timeout, target_url=args.url)
+    auth = await login.login_grab_ticket(
+        headless=args.headless,
+        timeout=args.timeout,
+        target_url=args.url,
+        executable_path=args.browser,
+    )
     print(f"登录成功，凭证已保存到：{login.save_credential(auth)}")
 
 

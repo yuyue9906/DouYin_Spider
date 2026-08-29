@@ -61,22 +61,29 @@ class DYLoginApi:
             return auth
 
     # 扫码登录并抓 ticket
-    async def login_grab_ticket(self, headless=False, timeout=300, target_url=None):
+    async def login_grab_ticket(self, headless=False, timeout=300, target_url=None, executable_path=None):
         async with async_playwright() as p:
             browser = None
             launch_errors = []
-            for channel in ("msedge", "chrome", None):
+            launch_targets = []
+            if executable_path:
+                launch_targets.append(("指定浏览器", {"executable_path": executable_path}))
+            launch_targets.extend([
+                ("msedge", {"channel": "msedge"}),
+                ("chrome", {"channel": "chrome"}),
+                ("chromium", {}),
+            ])
+            for label, target_kwargs in launch_targets:
                 try:
                     kwargs = {
                         "headless": headless,
                         "args": ['--disable-blink-features=AutomationControlled'],
                     }
-                    if channel:
-                        kwargs["channel"] = channel
+                    kwargs.update(target_kwargs)
                     browser = await p.chromium.launch(**kwargs)
                     break
                 except Exception as exc:
-                    launch_errors.append(f"{channel or 'chromium'}: {exc}")
+                    launch_errors.append(f"{label}: {exc}")
             if browser is None:
                 raise RuntimeError("无法启动可用浏览器：" + " | ".join(launch_errors))
             page = await browser.new_page()

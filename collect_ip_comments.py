@@ -18,6 +18,7 @@ from playwright.sync_api import sync_playwright
 
 from builder.auth import DouyinAuth
 from dy_apis.douyin_api import DouyinAPI
+from target_comment_filter import evaluate_target_comment
 
 
 GENDER_NAMES = {0: "未知", 1: "男", 2: "女"}
@@ -54,6 +55,10 @@ def parse_args():
     )
     parser.add_argument("--exclude-name-keywords", default="", help="排除昵称中含有的词，多个词用英文逗号分隔")
     parser.add_argument("--exclude-content-regex", default="", help="排除评论内容的正则表达式")
+    parser.add_argument(
+        "--target-filter", action="store_true",
+        help="启用精准客户规则，并补充评论者主页的粉丝量、获赞量等公开数据",
+    )
     parser.add_argument("--output", default="datas/ip_comments.json", help="输出 .json 或 .csv 文件")
     parser.add_argument("--handoff-output", default="", help="额外输出项目 20 MCP 可直接接收的批次 JSON")
     parser.add_argument("--command-id", default="", help="交接批次 ID；默认自动生成")
@@ -98,6 +103,7 @@ def public_profile(user):
         "signature": user.get("signature") or "",
         "following_count": public_count(user, "following_count"),
         "follower_count": public_count(user, "follower_count"),
+        "favoriting_count": public_count(user, "favoriting_count"),
         "total_favorited": public_count(user, "total_favorited"),
         "aweme_count": public_count(user, "aweme_count"),
     }
@@ -135,6 +141,7 @@ def comment_row(comment, level, parent_cid=""):
         "profile_error": "",
         "following_count": "未知",
         "follower_count": "未知",
+        "favoriting_count": "未知",
         "total_favorited": "未知",
         "aweme_count": "未知",
     }
@@ -180,8 +187,12 @@ def collect_comments(
     auth, url, region="", include_replies=False, max_pages=0, page_size=20,
     row_filter=None, candidate_limit=0, page_interval_min=0.0,
     page_interval_max=0.0, stop_before_timestamp=0, checkpoint_output="",
-    start_cursor="0", initial_rows=None,
+    start_cursor="0", initial_rows=None, stats=None,
 ):
+    stats = stats if stats is not None else {}
+    stats.setdefault("total_comments_seen", 0)
+    stats.setdefault("region_comments_seen", 0)
+    stats.setdefault("text_candidates", 0)
     rows = list(initial_rows or [])
     seen_cids = {str(row.get("cid") or "") for row in rows if row.get("cid")}
     cursor = str(start_cursor or "0")
@@ -191,11 +202,16 @@ def collect_comments(
         payload = DouyinAPI.get_work_out_comment(auth, url, cursor, count=str(page_size))
         comments = checked_comments(payload)
         for comment in comments:
+            stats["total_comments_seen"] += 1
             row = comment_row(comment, 1)
+            region_matches = row["ip_location"] and (not region or region in row["ip_location"])
+            if region_matches:
+                stats["region_comments_seen"] += 1
             if (row["cid"] not in seen_cids
-                    and row["ip_location"] and (not region or region in row["ip_location"])
+                    and region_matches
                     and (row_filter is None or row_filter(row))):
                 rows.append(row)
+                stats["text_candidates"] += 1
                 if row["cid"]:
                     seen_cids.add(row["cid"])
                 if candidate_limit and len(rows) >= candidate_limit:
@@ -306,6 +322,20 @@ def save_rows(rows, output):
     else:
         raise ValueError("--output 只支持 .json 或 .csv")
     return path.resolve()
+
+
+def deduplicate_rows(rows):
+    result = []
+    seen = set()
+    for row in rows:
+        identity = str(row.get("cid") or "").strip() or (
+            str(row.get("nickname") or "").strip(), str(row.get("text") or "").strip()
+        )
+        if identity in seen:
+            continue
+        seen.add(identity)
+        result.append(row)
+    return result
 
 
 def build_handoff_command(rows, video_url, aweme_id, command_id=""):
@@ -421,8 +451,10 @@ def main():
     content_pattern = re.compile(args.exclude_content_regex, re.IGNORECASE) if args.exclude_content_regex else None
 
     def row_filter(row):
+        target_ok = not args.target_filter or evaluate_target_comment(row)[0]
         return (
             is_recent(row, args.days)
+            and target_ok
             and str(row.get("cid")) not in excluded_cids
             and not any(word in row.get("nickname", "") for word in excluded_words)
             and not (content_pattern and content_pattern.search(row.get("text", "")))
@@ -431,6 +463,7 @@ def main():
     initial_rows = []
     if args.resume and Path(args.output).exists() and Path(args.output).suffix.lower() == ".json":
         initial_rows = json.loads(Path(args.output).read_text(encoding="utf-8"))
+    collection_stats = {}
     rows, pages = collect_comments(
         auth, url, region=args.region, include_replies=args.include_replies,
         max_pages=args.max_pages, page_size=args.page_size,
@@ -444,6 +477,7 @@ def main():
         checkpoint_output=args.output,
         start_cursor=args.start_cursor,
         initial_rows=initial_rows,
+        stats=collection_stats,
     )
     rows = [row for row in rows if is_recent(row, args.days)]
     rows = [row for row in rows if str(row.get("cid")) not in excluded_cids]
@@ -451,14 +485,24 @@ def main():
         rows = [row for row in rows if not any(word in row.get("nickname", "") for word in excluded_words)]
     if content_pattern:
         rows = [row for row in rows if not content_pattern.search(row.get("text", ""))]
+    if args.target_filter:
+        rows = [row for row in rows if evaluate_target_comment(row)[0]]
+    rows = deduplicate_rows(rows)
     rows.sort(key=lambda row: int(row.get("create_time") or 0), reverse=True)
-    if args.exclude_male and not args.profile:
+    if args.exclude_male and not (args.profile or args.target_filter):
         raise ValueError("--exclude-male 必须和 --profile 一起使用")
-    if args.profile:
-        profile_limit = args.limit + 10 if args.web_profile_fallback and args.limit else args.limit
+    if args.profile or args.target_filter:
+        if args.target_filter and args.limit:
+            profile_limit = args.limit + max(20, args.limit)
+        else:
+            profile_limit = args.limit + 10 if args.web_profile_fallback and args.limit else args.limit
         rows, profile_count = enrich_and_select_profiles(
             auth, rows, args.interval, exclude_male=args.exclude_male, limit=profile_limit
         )
+        if args.target_filter:
+            rows = [row for row in rows if evaluate_target_comment(row)[0]]
+            if args.limit:
+                rows = rows[:args.limit]
     else:
         profile_count = 0
         if args.limit:
@@ -474,6 +518,12 @@ def main():
         if args.limit:
             rows = rows[:args.limit]
     output = save_rows(rows, args.output)
+    collection_stats.update({
+        "qualified_comments": len(rows),
+        "rejected_comments": max(0, collection_stats.get("total_comments_seen", 0) - len(rows)),
+    })
+    stats_output = Path(output).with_suffix(".stats.json")
+    stats_output.write_text(json.dumps(collection_stats, ensure_ascii=False, indent=2), encoding="utf-8")
     handoff = None
     command_id = ""
     if args.handoff_output:
@@ -487,6 +537,8 @@ def main():
         "comments": len(rows),
         "profiles": profile_count,
         "output": str(output),
+        "stats_output": str(stats_output.resolve()),
+        "stats": collection_stats,
         "command_id": command_id,
         "handoff_output": str(handoff) if handoff else "",
     }, ensure_ascii=False, indent=2))
