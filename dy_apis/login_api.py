@@ -61,10 +61,11 @@ class DYLoginApi:
             return auth
 
     # 扫码登录并抓 ticket
-    async def login_grab_ticket(self, headless=False, timeout=300, target_url=None):
+    async def login_grab_ticket(self, headless=False, timeout=300, target_url=None, executable_path=None):
         async with async_playwright() as p:
             browser = await p.chromium.launch(
                 headless=headless,
+                executable_path=executable_path,
                 args=['--disable-blink-features=AutomationControlled'],
             )
             page = await browser.new_page()
