@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 import os
+import random
 import re
 import sys
 import time
@@ -37,7 +38,11 @@ def parse_args():
     parser.add_argument("--max-pages", type=int, default=0, help="一级评论最大页数；0 表示直到末页")
     parser.add_argument("--page-size", type=int, default=20, help="每页请求评论数，默认 20（实际数量由平台决定）")
     parser.add_argument("--candidate-limit", type=int, default=0, help="收集到多少条候选后停止分页；0 表示不限")
+    parser.add_argument("--start-cursor", default="0", help="从指定一级评论游标继续抓取")
+    parser.add_argument("--resume", action="store_true", help="读取现有 JSON 输出并在其后追加去重")
     parser.add_argument("--interval", type=float, default=0.8, help="主页请求间隔秒数，默认 0.8")
+    parser.add_argument("--page-interval-min", type=float, default=0.0, help="一级评论分页最小等待秒数")
+    parser.add_argument("--page-interval-max", type=float, default=0.0, help="一级评论分页最大等待秒数")
     parser.add_argument("--days", type=int, default=0, help="只保留最近多少天的评论；0 表示不限")
     parser.add_argument("--limit", type=int, default=0, help="最多输出多少条；0 表示不限")
     parser.add_argument(
@@ -173,11 +178,13 @@ def checked_comments(payload):
 
 def collect_comments(
     auth, url, region="", include_replies=False, max_pages=0, page_size=20,
-    row_filter=None, candidate_limit=0,
+    row_filter=None, candidate_limit=0, page_interval_min=0.0,
+    page_interval_max=0.0, stop_before_timestamp=0, checkpoint_output="",
+    start_cursor="0", initial_rows=None,
 ):
-    rows = []
-    seen_cids = set()
-    cursor = "0"
+    rows = list(initial_rows or [])
+    seen_cids = {str(row.get("cid") or "") for row in rows if row.get("cid")}
+    cursor = str(start_cursor or "0")
     page = 0
     while True:
         page += 1
@@ -192,6 +199,8 @@ def collect_comments(
                 if row["cid"]:
                     seen_cids.add(row["cid"])
                 if candidate_limit and len(rows) >= candidate_limit:
+                    if checkpoint_output:
+                        save_rows(rows, checkpoint_output)
                     return rows, page
 
             if include_replies and int(comment.get("reply_comment_total") or 0) > 0:
@@ -205,7 +214,23 @@ def collect_comments(
                         if reply_row["cid"]:
                             seen_cids.add(reply_row["cid"])
                         if candidate_limit and len(rows) >= candidate_limit:
+                            if checkpoint_output:
+                                save_rows(rows, checkpoint_output)
                             return rows, page
+
+        if checkpoint_output:
+            save_rows(rows, checkpoint_output)
+        print(json.dumps({
+            "分页": page,
+            "游标": payload.get("cursor"),
+            "已收集符合条件": len(rows),
+            "本页评论": len(comments),
+        }, ensure_ascii=False), flush=True)
+
+        page_timestamps = [int(comment.get("create_time") or 0) for comment in comments]
+        if (stop_before_timestamp and page_timestamps
+                and max(page_timestamps) < stop_before_timestamp):
+            return rows, page
 
         if not comments or payload.get("has_more") != 1 or (max_pages and page >= max_pages):
             return rows, page
@@ -213,6 +238,10 @@ def collect_comments(
         if next_cursor == cursor:
             raise RuntimeError(f"评论游标未前进，已在第 {page} 页停止，避免无限循环")
         cursor = next_cursor
+        if page_interval_max > 0:
+            low = max(0.0, page_interval_min)
+            high = max(low, page_interval_max)
+            time.sleep(random.uniform(low, high))
 
 
 def enrich_profiles(auth, rows, interval=0.8):
@@ -399,10 +428,22 @@ def main():
             and not (content_pattern and content_pattern.search(row.get("text", "")))
         )
 
+    initial_rows = []
+    if args.resume and Path(args.output).exists() and Path(args.output).suffix.lower() == ".json":
+        initial_rows = json.loads(Path(args.output).read_text(encoding="utf-8"))
     rows, pages = collect_comments(
         auth, url, region=args.region, include_replies=args.include_replies,
         max_pages=args.max_pages, page_size=args.page_size,
         row_filter=row_filter, candidate_limit=args.candidate_limit,
+        page_interval_min=args.page_interval_min,
+        page_interval_max=args.page_interval_max,
+        # Douyin can mix pinned/hot comments into cursor pages, so page age is
+        # not monotonic. Filter each row by date, but never stop solely because
+        # one page contains only older comments.
+        stop_before_timestamp=0,
+        checkpoint_output=args.output,
+        start_cursor=args.start_cursor,
+        initial_rows=initial_rows,
     )
     rows = [row for row in rows if is_recent(row, args.days)]
     rows = [row for row in rows if str(row.get("cid")) not in excluded_cids]
