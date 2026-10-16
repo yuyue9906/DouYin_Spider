@@ -33,8 +33,8 @@ def parse_args():
     parser.add_argument("--include-replies", action="store_true", help="同时抓取所有二级回复")
     parser.add_argument("--profile", action="store_true", help="进入评论者主页补充公开地区、性别等字段")
     parser.add_argument(
-        "--web-profile-fallback", action="store_true",
-        help="接口性别未知时，再读取主页公开展示区域（较慢）",
+        "--web-profile-fallback", action=argparse.BooleanOptionalAction, default=True,
+        help="接口性别未知时，用主页公开性别图标颜色兜底；可用 --no-web-profile-fallback 关闭",
     )
     parser.add_argument("--max-pages", type=int, default=0, help="一级评论最大页数；0 表示直到末页")
     parser.add_argument("--page-size", type=int, default=20, help="每页请求评论数，默认 20（实际数量由平台决定）")
@@ -91,14 +91,31 @@ def normalize_gender(value):
             return stripped
         if stripped.isdigit():
             value = int(stripped)
-    return GENDER_NAMES.get(value, "未知")
+    if isinstance(value, bool):
+        return "未知"
+    return GENDER_NAMES.get(value, "未知") if isinstance(value, int) else "未知"
+
+
+def profile_gender(user):
+    """Interpret the gender enum returned by Douyin's public profile API."""
+    user = user if isinstance(user, dict) else {}
+    raw_value = user.get("gender")
+    gender = normalize_gender(raw_value)
+    return {
+        "gender": gender,
+        "gender_code": raw_value if isinstance(raw_value, (int, str)) and not isinstance(raw_value, bool) else None,
+        "gender_public": gender in ("男", "女"),
+        "gender_source": "抖音资料接口 user.gender" if gender in ("男", "女") else "抖音资料接口未公开",
+        "gender_confidence": "接口明确值" if gender in ("男", "女") else "未知",
+    }
 
 
 def public_profile(user):
     """Return public fields only; do not infer hidden profile attributes."""
+    user = user if isinstance(user, dict) else {}
     return {
         "profile_ip": user.get("ip_location") or "未知",
-        "gender": normalize_gender(user.get("gender")),
+        **profile_gender(user),
         "age": user.get("user_age") or "未知",
         "signature": user.get("signature") or "",
         "following_count": public_count(user, "following_count"),
@@ -135,7 +152,11 @@ def comment_row(comment, level, parent_cid=""):
         "profile_url": f"https://www.douyin.com/user/{sec_uid}" if sec_uid else "",
         "profile_ip": "",
         "gender": "",
+        "gender_code": None,
+        "gender_public": False,
         "gender_source": "",
+        "gender_confidence": "未知",
+        "gender_evidence": "",
         "age": "",
         "signature": "",
         "profile_error": "",
@@ -260,21 +281,46 @@ def collect_comments(
             time.sleep(random.uniform(low, high))
 
 
+def fetch_public_profile(auth, profile_url):
+    payload = DouyinAPI.get_user_info(auth, profile_url)
+    if not isinstance(payload, dict):
+        raise RuntimeError("资料接口没有返回有效对象")
+    if payload.get("status_code") not in (None, 0):
+        raise RuntimeError(f"status_code={payload.get('status_code')}")
+    user = payload.get("user")
+    if not isinstance(user, dict) or not user:
+        raise RuntimeError("资料接口没有返回用户资料")
+    return public_profile(user)
+
+
+def _api_error_profile(exc):
+    return {
+        "gender": "未知",
+        "gender_code": None,
+        "gender_public": False,
+        "gender_source": "抖音资料接口请求失败",
+        "gender_confidence": "未知",
+        "profile_error": f"资料接口请求失败（{type(exc).__name__}）",
+    }
+
+
 def enrich_profiles(auth, rows, interval=0.8):
     cache = {}
     for row in rows:
         sec_uid = row["sec_uid"]
         if not sec_uid:
+            row.update({
+                "gender": "未知",
+                "gender_public": False,
+                "gender_source": "评论数据中没有用户标识",
+            })
             row["profile_error"] = "评论数据中没有 sec_uid"
             continue
         if sec_uid not in cache:
             try:
-                payload = DouyinAPI.get_user_info(auth, row["profile_url"])
-                if payload.get("status_code") not in (None, 0):
-                    raise RuntimeError(f"status_code={payload.get('status_code')}")
-                cache[sec_uid] = public_profile(payload.get("user") or {})
-            except (KeyError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
-                cache[sec_uid] = {"profile_error": str(exc)}
+                cache[sec_uid] = fetch_public_profile(auth, row["profile_url"])
+            except Exception as exc:
+                cache[sec_uid] = _api_error_profile(exc)
             if interval > 0:
                 time.sleep(interval)
         row.update(cache[sec_uid])
@@ -287,15 +333,17 @@ def enrich_and_select_profiles(auth, rows, interval=0.8, exclude_male=False, lim
     for row in rows:
         sec_uid = row["sec_uid"]
         if not sec_uid:
+            row.update({
+                "gender": "未知",
+                "gender_public": False,
+                "gender_source": "评论数据中没有用户标识",
+            })
             row["profile_error"] = "评论数据中没有 sec_uid"
         elif sec_uid not in cache:
             try:
-                payload = DouyinAPI.get_user_info(auth, row["profile_url"])
-                if payload.get("status_code") not in (None, 0):
-                    raise RuntimeError(f"status_code={payload.get('status_code')}")
-                cache[sec_uid] = public_profile(payload.get("user") or {})
-            except (KeyError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
-                cache[sec_uid] = {"profile_error": str(exc), "gender": "未知"}
+                cache[sec_uid] = fetch_public_profile(auth, row["profile_url"])
+            except Exception as exc:
+                cache[sec_uid] = _api_error_profile(exc)
             if interval > 0:
                 time.sleep(interval)
         if sec_uid:
@@ -396,34 +444,122 @@ def browser_cookies(cookie_string):
 
 
 def enrich_visible_genders(rows, cookie_string, wait_ms=2500):
-    """Read only an explicitly displayed 男/女 label from the profile header."""
+    """Use the visible profile gender icon color, then exact public text, as fallback."""
+    pending_groups = {}
+    for row in rows:
+        profile_url = row.get("profile_url")
+        if row.get("gender") in ("", "未知") and profile_url:
+            pending_groups.setdefault(profile_url, []).append(row)
+    pending = [group[0] for group in pending_groups.values()]
+    if not pending:
+        return 0
+    if not cookie_string:
+        for group in pending_groups.values():
+            for row in group:
+                row["gender_source"] = "主页兜底不可用：缺少登录态"
+                missing_cookie = "缺少已登录抖音 Cookie，无法读取主页公开信息"
+                row["profile_error"] = (
+                    f"{row.get('profile_error')}; {missing_cookie}"
+                    if row.get("profile_error") else missing_cookie
+                )
+        return 0
+
+    selectors = (
+        "[data-e2e='user-detail'] .rTzhSEM4",
+        "#user_detail_element .rTzhSEM4",
+        "[data-e2e='user-info'] .rTzhSEM4",
+        ".rTzhSEM4",
+    )
     checked = 0
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=True)
-        context = browser.new_context()
-        context.add_cookies(browser_cookies(cookie_string))
-        page = context.new_page()
-        for row in rows:
-            if row.get("gender") != "未知" or not row.get("profile_url"):
-                continue
-            try:
-                page.goto(row["profile_url"], wait_until="domcontentloaded", timeout=30000)
-                page.wait_for_timeout(wait_ms)
-                header = page.locator("#user_detail_element")
-                visible_text = header.inner_text(timeout=5000) if header.count() else ""
-                labels = {line.strip() for line in visible_text.splitlines()}
-                if "女" in labels:
-                    row["gender"] = "女"
-                    row["gender_source"] = "主页公开展示"
-                elif "男" in labels:
-                    row["gender"] = "男"
-                    row["gender_source"] = "主页公开展示"
-                else:
-                    row["gender_source"] = "主页未公开"
-                checked += 1
-            except PlaywrightError as exc:
-                row["profile_error"] = (row.get("profile_error") + "; " + str(exc)).strip("; ")
-        browser.close()
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            context = browser.new_context()
+            context.add_cookies(browser_cookies(cookie_string))
+            page = context.new_page()
+            for row in pending:
+                try:
+                    page.goto(row["profile_url"], wait_until="domcontentloaded", timeout=30000)
+                    page.wait_for_timeout(wait_ms)
+                    detected = ""
+                    evidence = ""
+                    for selector in selectors:
+                        nodes = page.locator(selector)
+                        for index in range(min(nodes.count(), 8)):
+                            node = nodes.nth(index)
+                            if not node.is_visible():
+                                continue
+                            colors = node.locator("svg").evaluate_all(
+                                "svgs => svgs.flatMap(svg => [svg, ...svg.querySelectorAll('*')])"
+                                ".flatMap(el => ['fill', 'stroke'].map(attribute => ({"
+                                "attribute, value: (el.getAttribute(attribute) || '').trim().toUpperCase()"
+                                "}))).filter(item => item.value)"
+                            )
+                            male_match = any(
+                                item.get("attribute") == "fill" and item.get("value") == "#168EF9"
+                                for item in colors
+                            )
+                            female_match = any(
+                                item.get("attribute") == "stroke" and item.get("value") == "#F5588E"
+                                for item in colors
+                            )
+                            if male_match != female_match:
+                                detected = "男" if male_match else "女"
+                                evidence = "fill=#168EF9" if male_match else "stroke=#F5588E"
+                                row["gender_source"] = "主页性别图标颜色（Playwright备用）"
+                                row["gender_confidence"] = "图标颜色推断（可能误判）"
+                                break
+                        if detected:
+                            break
+
+                    if not detected:
+                        header = page.locator("#user_detail_element")
+                        visible_text = header.inner_text(timeout=5000) if header.count() else ""
+                        labels = {line.strip() for line in visible_text.splitlines()}
+                        if "女" in labels:
+                            detected = "女"
+                            evidence = "公开资料栏文字"
+                            row["gender_source"] = "主页公开文字（Playwright备用）"
+                            row["gender_confidence"] = "主页明确文字"
+                        elif "男" in labels:
+                            detected = "男"
+                            evidence = "公开资料栏文字"
+                            row["gender_source"] = "主页公开文字（Playwright备用）"
+                            row["gender_confidence"] = "主页明确文字"
+                        else:
+                            row["gender_source"] = "主页未显示性别"
+                            row["gender_confidence"] = "未知"
+
+                    if detected:
+                        row["gender"] = detected
+                        row["gender_public"] = True
+                        row["gender_evidence"] = evidence
+                    checked += 1
+                except PlaywrightError as exc:
+                    row["gender_source"] = "主页兜底失败"
+                    row["profile_error"] = (
+                        f"{row.get('profile_error')}; 主页兜底失败（{type(exc).__name__}）"
+                        if row.get("profile_error") else f"主页兜底失败（{type(exc).__name__}）"
+                    )
+    except PlaywrightError as exc:
+        for group in pending_groups.values():
+            for row in group:
+                if row.get("gender") not in ("", "未知"):
+                    continue
+                row["gender_source"] = "主页兜底失败"
+                row["profile_error"] = (
+                    f"{row.get('profile_error')}; 浏览器启动失败（{type(exc).__name__}）"
+                    if row.get("profile_error") else f"浏览器启动失败（{type(exc).__name__}）"
+                )
+    for profile_url, group in pending_groups.items():
+        source = group[0]
+        for row in group[1:]:
+            for key in (
+                "gender", "gender_code", "gender_public", "gender_source",
+                "gender_confidence", "gender_evidence", "profile_error",
+            ):
+                if key in source:
+                    row[key] = source[key]
     return checked
 
 
@@ -507,11 +643,8 @@ def main():
         profile_count = 0
         if args.limit:
             rows = rows[:args.limit]
-    if args.web_profile_fallback:
-        if not args.profile:
-            raise ValueError("--web-profile-fallback 必须和 --profile 一起使用")
-        load_dotenv()
-        cookie_string = os.getenv("DY_COOKIES", "").strip().strip("'\"")
+    if args.web_profile_fallback and (args.profile or args.target_filter or args.exclude_male):
+        cookie_string = auth.cookie_str or ""
         enrich_visible_genders(rows, cookie_string)
         if args.exclude_male:
             rows = [row for row in rows if row.get("gender") != "男"]

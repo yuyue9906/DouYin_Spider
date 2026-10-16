@@ -63,8 +63,14 @@ def main() -> int:
             print(json.dumps({"checked": checked, "row": index, "total": len(rows)}, ensure_ascii=False), flush=True)
         if args.interval:
             time.sleep(args.interval)
+    gender_fallback_checked = collector.enrich_visible_genders(rows, auth.cookie_str or "")
     output.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(json.dumps({"done": True, "checked": checked, "total": len(rows)}, ensure_ascii=False))
+    print(json.dumps({
+        "done": True,
+        "checked": checked,
+        "gender_fallback_checked": gender_fallback_checked,
+        "total": len(rows),
+    }, ensure_ascii=False))
     return 0
 
 
