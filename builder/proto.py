@@ -109,3 +109,29 @@ class ProtoBuilder:
         }, auth.private_key)
         request.reuqest_sign = req_sign
         return request
+
+    @staticmethod
+    def build_send_comment_share_request(auth, conversation_id, conversation_short_id, ticket, share_content):
+        """Build an IM SHARE_COMMENT message using the captured web protocol."""
+        client_message_id = str(uuid.uuid4())
+        request = ProtoBuilder.build_normal_request(auth, 100)
+        request.sdk_version = "0.1.8"
+        request.build_number = "0d50935:feat/pc-im-groupB"
+        content = json.dumps(share_content, ensure_ascii=False, separators=(',', ':'))
+        body = request.body.send_message_body
+        body.conversation_id = conversation_id
+        body.conversation_type = 1
+        body.conversation_short_id = conversation_short_id
+        body.content = content
+        body.ext.append(RequestProto.ExtValue(key='s:client_message_id', value=client_message_id))
+        body.ext.append(RequestProto.ExtValue(key='s:stime', value=str(generate_millisecond())))
+        body.ext.append(RequestProto.ExtValue(key='s:mentioned_users', value=''))
+        body.message_type = 105
+        body.ticket = ticket
+        body.client_message_id = client_message_id
+        request.reuqest_sign = generate_req_sign({
+            "sign_data": f'content={content}&conversation_id={conversation_id}&conversation_short_id={conversation_short_id}',
+            "certType": "cookie",
+            "scene": "web_protect"
+        }, auth.private_key)
+        return request

@@ -70,6 +70,9 @@
   - WebSocket 实时接收私信（文本 / 表情包 / 语音 / 图片 / 分享视频）
   - 主动发送私信
   - 创建 / 查询会话列表
+- 🔁 **评论卡片转发**
+  - 通过 IM Protobuf API 转发指定视频评论，不模拟网页按钮点击
+  - 支持按评论 ID 或完整文本定位，并按精确昵称匹配收件人
 - 🤝 **互动操作**
   - 点赞视频
   - 发布评论 / 回复评论
@@ -132,11 +135,25 @@ python dy_live/server.py
 
 # 抖音私信实时接收
 python dy_apis/douyin_recv_msg.py
+
+# 预览一条评论的转发目标（默认不会发送）
+python forward_comment_api.py --video "<视频链接或作品ID>" --comment-id "<评论ID>" --recipient "<抖音昵称>"
+
+# 用户明确要求转发且预览匹配无误后，添加 --send 执行一次真实发送
+python forward_comment_api.py --video "<视频链接或作品ID>" --comment-id "<评论ID>" --recipient "<抖音昵称>" --send
+
+# 详情接口不可用时，使用用户从同一视频复制的封面 JSON（默认仍为预览）
+python forward_comment_api.py --video "<作品ID>" --comment-id "<评论ID>" --recipient "<抖音昵称>" --cover-file "<封面JSON路径>"
 ```
+
+封面 JSON 格式为 `{"video_id":"<作品ID>","cover":{"uri":"<封面URI>","url_list":["<完整HTTPS图片地址>"]}}`。
+`video_id` 必须与目标视频一致；Python 入口可通过 `cover_data` 传入同一对象。此选项只替代封面读取，仍会核对评论和收件人。
 
 ### 🗝️注意事项
 - `main.py` 是爬虫入口，可根据需求自行修改调用
 - `dy_apis/douyin_api.py` 包含全部 API 接口封装，含直播间点赞、发消息、私信收发等
+- `comment_share.py` 提供可供 Python / Codex Agent 调用的单条评论转发流程；`forward_comment_api.py` 是对应命令行入口。视频、评论、收件人必须明确；昵称或评论匹配不唯一时会停止。私信签名凭据从项目 `.env` 读取。
+- `skills/douyin-comment-forward/SKILL.md` 说明 Codex Agent 如何收集必填信息并调用评论转发入口
 - `dy_live/server.py` 包含直播间 WebSocket 监听逻辑
 - `dy_apis/douyin_recv_msg.py` 包含抖音私信 WebSocket 实时接收逻辑
 

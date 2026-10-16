@@ -15,6 +15,71 @@ from google.protobuf.json_format import MessageToDict as _message_to_dict
 def protobuf_to_dict(message):
     return _message_to_dict(message, preserving_proto_field_name=True)
 
+
+def _read_protobuf_varint(data, offset):
+    value = 0
+    shift = 0
+    while offset < len(data) and shift <= 70:
+        byte = data[offset]
+        offset += 1
+        value |= (byte & 0x7f) << shift
+        if byte < 0x80:
+            return value, offset
+        shift += 7
+    raise ValueError("Malformed protobuf varint")
+
+
+def _protobuf_fields(data):
+    fields = []
+    offset = 0
+    while offset < len(data):
+        tag, offset = _read_protobuf_varint(data, offset)
+        field_number, wire_type = tag >> 3, tag & 7
+        if wire_type == 0:
+            value, offset = _read_protobuf_varint(data, offset)
+        elif wire_type == 2:
+            length, offset = _read_protobuf_varint(data, offset)
+            end = offset + length
+            if end > len(data):
+                raise ValueError("Truncated protobuf field")
+            value, offset = data[offset:end], end
+        elif wire_type == 1:
+            value, offset = data[offset:offset + 8], offset + 8
+        elif wire_type == 5:
+            value, offset = data[offset:offset + 4], offset + 4
+        else:
+            raise ValueError(f"Unsupported protobuf wire type: {wire_type}")
+        fields.append((field_number, wire_type, value))
+    return fields
+
+
+def _decode_im_send_response(data):
+    outer = _protobuf_fields(data)
+    body = next(value for number, wire, value in outer if number == 6 and wire == 2)
+    send_body = next(value for number, wire, value in _protobuf_fields(body) if number == 100 and wire == 2)
+    fields = _protobuf_fields(send_body)
+    values = {(number, wire): value for number, wire, value in fields}
+    status = values.get((3, 0), 0)
+    status_names = {
+        0: "SEND_SUCCEED",
+        1: "USER_NOT_IN_CONVERSATION",
+        2: "CHECK_CONV_NOT_PASS",
+        3: "CHECK_MSG_NOT_PASS",
+        4: "CHECK_MSG_NOT_PASS_BUT_SELF_VISIBLE",
+        5: "USER_HAS_BEEN_BLOCKED",
+        6: "CHECK_SUB_CONV_STATUS_ERROR",
+        7: "CHECK_CONVERSATION_NOT_FOUND",
+    }
+    return {
+        "message": next((value.decode("utf-8", errors="replace") for number, wire, value in outer
+                         if number == 4 and wire == 2), ""),
+        "status": status,
+        "status_name": status_names.get(status, "UNKNOWN"),
+        "server_message_id": values.get((1, 0), 0),
+        "check_code": values.get((5, 0), 0),
+        "check_message": values.get((6, 2), b"").decode("utf-8", errors="replace"),
+    }
+
 import static.Response_pb2 as ResponseProto
 from builder.header import HeaderBuilder, HeaderType
 from builder.params import Params
@@ -112,7 +177,7 @@ class DouyinAPI:
         return json.loads(resp.text)
 
     @staticmethod
-    def get_work_info(auth, url: str) -> dict:
+    def get_work_info(auth, url: str, **kwargs) -> dict:
         """
         获取作品信息.
         :param auth: DouyinAuth object.
@@ -162,8 +227,9 @@ class DouyinAPI:
         params.with_a_bogus()
         params.add_param("verifyFp", auth.cookie['s_v_web_id'])
         params.add_param("fp", auth.cookie['s_v_web_id'])
-        resp = requests.get(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), cookies=auth.cookie,
-                            params=params.get(), verify=False)
+        http = kwargs.get("session", requests)
+        resp = http.get(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), cookies=auth.cookie,
+                        params=params.get(), verify=False, timeout=kwargs.get("timeout", 20))
         resp_json = json.loads(resp.text)
         return resp_json
 
@@ -235,8 +301,9 @@ class DouyinAPI:
         uifid = auth.cookie.get("UIFID", auth.cookie.get("UIFID_TEMP", ""))
         if uifid:
             headers.set_header("uifid", uifid)
-        resp = requests.get(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), cookies=auth.cookie,
-                            params=params.get(), verify=False, timeout=kwargs.get("timeout", 30))
+        http = kwargs.get("session", requests)
+        resp = http.get(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), cookies=auth.cookie,
+                        params=params.get(), verify=False, timeout=kwargs.get("timeout", 30))
         resp_json = json.loads(resp.text)
         return resp_json
 
@@ -314,8 +381,9 @@ class DouyinAPI:
         params.add_param("fp", auth.cookie['s_v_web_id'])
         params.add_param("msToken", auth.msToken)
         params.with_a_bogus()
-        resp = requests.get(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), cookies=auth.cookie,
-                            params=params.get(), verify=False)
+        http = kwargs.get("session", requests)
+        resp = http.get(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), cookies=auth.cookie,
+                        params=params.get(), verify=False, timeout=kwargs.get("timeout", 20))
         resp_json = json.loads(resp.text)
         return resp_json
 
@@ -403,8 +471,9 @@ class DouyinAPI:
         params.add_param('verifyFp', auth.cookie['s_v_web_id'])
         params.add_param('fp', auth.cookie['s_v_web_id'])
         params.with_a_bogus()
-        resp = requests.get(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), cookies=auth.cookie,
-                            params=params.get(), verify=False, timeout=kwargs.get("timeout", 15))
+        http = kwargs.get("session", requests)
+        resp = http.get(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), cookies=auth.cookie,
+                        params=params.get(), verify=False, timeout=kwargs.get("timeout", 15))
         return json.loads(resp.text)
 
     @staticmethod
@@ -584,8 +653,9 @@ class DouyinAPI:
         params.with_web_id(auth, refer)
         params.add_param("msToken", auth.msToken)
         params.with_a_bogus()
-        resp = requests.get(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), cookies=auth.cookie,
-                            params=params.get(), verify=False)
+        http = kwargs.get("session", requests)
+        resp = http.get(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), cookies=auth.cookie,
+                        params=params.get(), verify=False, timeout=kwargs.get("timeout", 20))
         return resp.json()
 
     @staticmethod
@@ -1742,12 +1812,14 @@ class DouyinAPI:
         headers = HeaderBuilder().build(HeaderType.PROTOBUF)
         headers.set_header('referer', 'https://www.douyin.com/')
 
-        resp = requests.post(
+        http = kwargs.get("session", requests)
+        resp = http.post(
             url,
             headers=headers.get(),
             cookies=auth.cookie,
             data=requestProto.SerializeToString(),
-            verify=False
+            verify=False,
+            timeout=kwargs.get("timeout", 20),
         )
         responseProto = ResponseProto.Response()
         responseProto.ParseFromString(resp.content)
@@ -1816,6 +1888,58 @@ class DouyinAPI:
         else:
             logger.error(f'私信发送失败 {resp_json}')
         return success
+
+    @staticmethod
+    def send_comment_share(auth, conversation_id, conversation_short_id, ticket, comment: dict,
+                           cover_url: dict, **kwargs) -> dict:
+        """Send one comment card through the IM API and return its business status."""
+        user = comment.get("user") or {}
+        card = {
+            "aweType": 10500,
+            "comment": comment.get("text", ""),
+            "comment_content_type": 1,
+            "comment_id": str(comment.get("cid", "")),
+            "comment_secuid": user.get("secUid") or user.get("sec_uid", ""),
+            "comment_user_name": user.get("nickname", ""),
+            "content_thumb": user.get("avatar_thumb") or user.get("avatarThumb") or {},
+            "cover_url": cover_url,
+            "is_card": False,
+            "itemId": str(comment.get("aweme_id", "")),
+            "msgHint": "",
+        }
+        request_proto = ProtoBuilder.build_send_comment_share_request(
+            auth, conversation_id, conversation_short_id, ticket, card
+        )
+        url = "https://imapi.douyin.com/v1/message/send"
+        params = {
+            "verifyFp": auth.cookie["s_v_web_id"],
+            "fp": auth.cookie["s_v_web_id"],
+            "msToken": generate_msToken(),
+        }
+        query = splice_url(params)
+        params["a_bogus"] = generate_a_bogus(query)
+        headers = HeaderBuilder().build(HeaderType.PROTOBUF)
+        headers.set_header("referer", "https://www.douyin.com/")
+        http = kwargs.get("session", requests)
+        response = http.post(
+            url,
+            params=params,
+            headers=headers.get(),
+            cookies=auth.cookie,
+            data=request_proto.SerializeToString(),
+            verify=False,
+            timeout=kwargs.get("timeout", 20),
+        )
+        response.raise_for_status()
+        result = _decode_im_send_response(response.content)
+        result["http_status"] = response.status_code
+        result["ok"] = (
+            response.status_code == 200
+            and result["message"] == "OK"
+            and result["status"] == 0
+            and result["check_code"] == 0
+        )
+        return result
 
     @staticmethod
     def get_device_id(auth, **kwargs) -> str:
