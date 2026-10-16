@@ -13,8 +13,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
-from playwright.sync_api import Error as PlaywrightError
-from playwright.sync_api import sync_playwright
 
 from builder.auth import DouyinAuth
 from dy_apis.douyin_api import DouyinAPI
@@ -461,6 +459,20 @@ def enrich_visible_genders(rows, cookie_string, wait_ms=2500):
                 row["profile_error"] = (
                     f"{row.get('profile_error')}; {missing_cookie}"
                     if row.get("profile_error") else missing_cookie
+                )
+        return 0
+
+    try:
+        from playwright.sync_api import Error as PlaywrightError
+        from playwright.sync_api import sync_playwright
+    except Exception as exc:
+        for group in pending_groups.values():
+            for row in group:
+                row["gender_source"] = "主页兜底不可用：Playwright 未就绪"
+                dependency_error = f"Playwright 兜底不可用（{type(exc).__name__}）"
+                row["profile_error"] = (
+                    f"{row.get('profile_error')}; {dependency_error}"
+                    if row.get("profile_error") else dependency_error
                 )
         return 0
 

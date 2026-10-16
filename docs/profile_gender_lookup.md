@@ -10,7 +10,7 @@ python scripts/query_public_gender.py "https://www.douyin.com/user/<sec_uid>"
 
 默认先读取 `GET /aweme/v1/web/user/profile/other/` 的 `user.gender`。值为 `1` 返回男、值为 `2` 返回女；`0`、空值、缺字段或接口失败时，才启动一个无界面的 Playwright 页面，检查主页资料栏中的公开性别标记。
 
-只查询 API、不启动浏览器时，添加 `--api-only`。批量评论采集可使用 `collect_ip_comments.py` 的 `--profile`；主页 API 未给出明确性别时默认执行相同兜底，也可以用 `--no-web-profile-fallback` 关闭。
+只查询 API、不启动浏览器时，添加 `--api-only`。API 已给出明确性别时不会加载 Playwright；如果需要兜底但 Playwright 依赖未就绪，结果会保留为“未知”并标记兜底不可用。批量评论采集可使用 `collect_ip_comments.py` 的 `--profile`；主页 API 未给出明确性别时默认执行相同兜底，也可以用 `--no-web-profile-fallback` 关闭。
 
 ## 兜底判定与结果
 
